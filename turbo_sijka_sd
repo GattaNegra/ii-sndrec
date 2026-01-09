@@ -54,7 +54,7 @@ void writeHeader(File f, uint32_t dSize, uint32_t rate) {
 
 void handleRoot() {
   String h = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><style>button{height:45px; margin:5px; padding:10px; border-radius:8px;} .file-box{background:#f0f0f0; padding:15px; border-bottom:2px solid #ccc; margin-bottom:10px; border-radius:10px;}</style></head><body>";
-  h += "<h1>🎙️ СИЙКА v8.65 (SD)</h1>";
+  h += "<h1>🎙️ Turbo СИЙКА v8.65 (SD)</h1>";
   
   // Операция 2: Проверка на SD картата вместо SPIFFS
   uint64_t cardSize = SD.cardSize() / (1024 * 1024);
@@ -64,7 +64,13 @@ void handleRoot() {
   
   h += "<button onclick=\"location.href='/toggle'\">▶ ПУСНИ/СПРИ</button><button onclick=\"location.href='/'\">🔄 ОПРЕСНИ</button><hr>";
   h += "<h3>⚙️ НАСТРОЙКИ:</h3><form action='/set'>";
-  h += "Hz: <input type='number' name='hz' value='"+String(sampleRate)+"' style='width:80px'> ";
+  //h += "Hz: <input type='number' name='hz' value='"+String(sampleRate)+"' style='width:80px'> ";
+  h += "Hz: <select name='hz' style='width:90px'>";
+  uint32_t rates[] = {8000, 16000, 32000, 44100, 48000};
+  for(int i=0; i<5; i++) {
+    h += "<option value='" + String(rates[i]) + "'" + (sampleRate == rates[i] ? " selected" : "") + ">" + String(rates[i]) + "</option>";
+  }
+  h += "</select> ";
   h += "Th: <input type='number' name='th' value='"+String(threshold)+"' style='width:60px'><br>";
   h += "Hys: <input type='number' name='hys' value='"+String(hysteresis)+"' style='width:60px'> ";
   h += "Sec: <input type='number' name='sec' value='"+String(maxDuration)+"' style='width:60px'><br>";
