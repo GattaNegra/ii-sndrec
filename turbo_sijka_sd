@@ -4,10 +4,10 @@
 #include <SD.h>          // За SD картата
 #include <driver/i2s.h>
 #include <Wire.h>        // За I2C комуникация
-#include "RTClib.h"      // Новият часовник от едноядрената
+#include "RTClib.h"      // часовник
 #include <WiFiManager.h>
 
-// Пинове за SD картата (от едноядрената)
+// Пинове за SD картата
 #define SD_CS 5
 #define SD_MOSI 23
 #define SD_MISO 19
@@ -25,7 +25,7 @@
 #define BTN_WIFI 4
 #define LED_WIFI 2
 
-RTC_DS3231 rtc;          // Операция 1: Присаждане на DS3231
+RTC_DS3231 rtc;          
 WebServer server(80);
 
 uint32_t sampleRate = 16000;
@@ -102,7 +102,7 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!rtc.begin()) { Serial.println("RTC Missing!"); }
   
-  // Инициализация на SPI и SD картата (Операция 2)
+  // Инициализация на SPI и SD картата
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   if (!SD.begin(SD_CS)) { Serial.println("SD Card Missing!"); }
 
@@ -141,7 +141,7 @@ server.on("/format", [](){
     root.close();
     
     String s = "<html><head><meta charset='UTF-8'><meta http-equiv='refresh' content='5;url=/'></head>";
-    s += "<body><p>Всички записи са изтрити. Сийка се опреснява...</p></body></html>";
+    s += "<body><p>Всички записи са изтрити.</p></body></html>";
     server.send(200, "text/html", s);
   });
   server.begin();
