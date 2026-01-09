@@ -1,4 +1,4 @@
-// * Turbo СИЙКА v8.64 (SPIFFS)
+// * Turbo СИЙКА v8.64 (2C SPIFFS)
 // * Copyright (C) 2026 GattaNegra gattanegrabg@gmail.com
 // * * This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License.
 
@@ -61,7 +61,7 @@ void writeHeader(File f, uint32_t dSize, uint32_t rate) {
 // Генериране на главната страница на уеб сайта
 void handleRoot() {
   String h = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><style>button{height:45px; margin:5px; padding:10px; border-radius:8px;} .file-box{background:#f0f0f0; padding:15px; border-bottom:2px solid #ccc; margin-bottom:10px; border-radius:10px;}</style></head><body>";
-  h += "<h1>🎙️ Turbo СИЙКА v8.64 (SPIFFS)</h1>";
+  h += "<h1>🎙️ Turbo СИЙКА v8.64 (2C SPIFFS)</h1>";
   size_t total = SPIFFS.totalBytes(); size_t used = SPIFFS.usedBytes();
   h += "Памет: <b>" + String((total - used)/1024) + " KB свободни</b><br>";
   h += "СТАТУС: <b>" + String(isPaused ? "ГОТОВ" : "<span style='color:red'>ЗАПИСВА/СЛУША</span>") + "</b><hr>";
