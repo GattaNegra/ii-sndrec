@@ -1,3 +1,7 @@
+// * Turbo СИЙКА v9 (2CSD)
+// * Copyright (C) 2026 GattaNegra gattanegrabg@gmail.com
+// * * This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License.
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SPI.h>         // Комуникация със SD картата (сериен протокол)
@@ -67,7 +71,7 @@ void writeHeader(File f, uint32_t dSize, uint32_t rate) {
 void handleRoot() {
   String h = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
   h += "<style>button{height:45px; margin:5px; padding:10px; border-radius:8px;} .file-box{background:#f0f0f0; padding:15px; border-bottom:2px solid #ccc; margin-bottom:10px; border-radius:10px;}</style></head><body>";
-  h += "<h1>🎙️ Turbo СИЙКА v8.65 (SD)</h1>";
+  h += "<h1>🎙️ Turbo СИЙКА v9 (2CSD)</h1>";
   
   // Изчисляване на паметта на SD картата
   uint64_t cardSize = SD.cardSize() / (1024 * 1024);
