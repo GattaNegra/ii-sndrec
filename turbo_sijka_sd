@@ -76,7 +76,7 @@ void handleRoot() {
   h += "Th: <input type='number' name='th' value='"+String(threshold)+"' style='width:60px'><br>";
   h += "Hys: <input type='number' name='hys' value='"+String(hysteresis)+"' style='width:60px'> ";
   h += "Sec: <input type='number' name='sec' value='"+String(maxDuration)+"' style='width:60px'><br>";
-  h += "Sil: <input type='number' name='sil' value='"+String(silLimit)+"' style='width:50px'>";
+  h += "Sil: <input type='number' name='sil' value='"+String(silLimit)+"' style='width:50px'><br>";
   h += "<input type='submit' value='ЗАПАЗИ НАСТРОЙКИТЕ'></form><hr><h3>📁 ЗАПИСИ (SD):</h3>";
   
   File root = SD.open("/"); File f = root.openNextFile();
@@ -116,6 +116,7 @@ void setup() {
     threshold = server.arg("th").toInt(); 
     hysteresis = server.arg("hys").toInt();
     maxDuration = server.arg("sec").toInt(); 
+   silLimit = server.arg("sil").toInt(); 
     setupI2S(sampleRate);
     server.sendHeader("Location", "/"); server.send(303); 
   });
@@ -148,7 +149,7 @@ void AudioTask(void * pvParameters) {
       for (int i=0; i<r/2; i++) if(abs(sBuf[i]) > peak) peak = abs(sBuf[i]);
 
       if (peak > threshold) {
-        DateTime now = rtc.now(); // Ползваме метода на DS3231
+        DateTime now = rtc.now();
         char fn[64];
         sprintf(fn, "/%04d-%02d-%02d_%02d-%02d-%02d.wav", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
         
@@ -157,10 +158,23 @@ void AudioTask(void * pvParameters) {
           file.write(new byte[44], 44);
           uint32_t total = 0;
           unsigned long startM = millis();
-          while(!isPaused && (millis() - startM < maxDuration * 1000)){
+          unsigned long lastSoundM = millis(); 
+          
+          while(!isPaused && (millis() - startM < (unsigned long)maxDuration * 1000)){
             if (i2s_read(I2S_NUM_0, &sBuf, sizeof(sBuf), &r, 10) == ESP_OK && r > 0) {
               file.write((const byte*)sBuf, r);
               total += r;
+
+              int currentPeak = 0;
+              for (int i=0; i<r/2; i++) if(abs(sBuf[i]) > currentPeak) currentPeak = abs(sBuf[i]);
+
+              if (currentPeak > (threshold - hysteresis)) {
+                lastSoundM = millis(); 
+              }
+
+              if (millis() - lastSoundM > (unsigned long)silLimit * 1000) {
+                break; // Спира записа при тишина
+              }
             }
           }
           writeHeader(file, total, sampleRate);
