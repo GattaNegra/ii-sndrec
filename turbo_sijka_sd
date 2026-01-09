@@ -87,6 +87,7 @@ void handleRoot() {
       h += "<a href='/dl?f="+n+"'>📥 СВАЛИ</a> | <a href='/del?f="+n+"' style='color:red'>[ИЗТРИЙ]</a></div>";
     } f = root.openNextFile();
   }
+h += "<hr><button style='background:#fee; color:red; width:100%' onclick=\"if(confirm('ТРИЕШ ВСИЧКИ ЗАПИСИ?')) location.href='/format'\">⚠ ИЗТРИЙ ВСИЧКО ОТ КАРТАТА</button>";
   h += "</body></html>";
   server.send(200, "text/html", h);
 }
@@ -108,9 +109,24 @@ void setup() {
   WiFiManager wm;
   wm.autoConnect("Siyka_Turbo_SD");
   setupI2S(sampleRate);
-
+  server.on("/format", [this](){ 
+    File root = SD.open("/");
+    File f = root.openNextFile();
+    while(f){
+      String n = f.name();
+      f.close(); // Затваряме файла, преди да го изтрием
+      if(n.endsWith(".wav")) {
+        SD.remove("/" + n);
+      }
+      f = root.openNextFile();
+    }
+    String s = "<html><head><meta http-equiv='refresh' content='5;url=/'></head>";
+    s += "<body><p>Всички записи са изтрити. Сийка се опреснява...</p></body></html>";
+    server.send(200, "text/html", s);
+  });
   server.on("/", handleRoot);
   server.on("/toggle", [](){ isPaused = !isPaused; server.sendHeader("Location", "/"); server.send(303); });
+
   server.on("/set", [](){ 
     sampleRate = server.arg("hz").toInt(); 
     threshold = server.arg("th").toInt(); 
