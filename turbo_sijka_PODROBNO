@@ -1,0 +1,194 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>      // Вътрешна флаш памет на ESP32
+#include <driver/i2s.h>  // Драйвер за цифрово аудио
+#include <ThreeWire.h>   // Протокол за връзка с часовника (3-жилен)
+#include <RtcDS1302.h>   // Библиотека за часовника DS1302
+#include <WiFiManager.h> // Автоматично създава AP за настройки на WiFi
+
+// Дефиниране на пиновете
+#define BTN_WIFI 4       // Физически бутон (паричката)
+#define LED_WIFI 2       // Вграден диод на платката
+#define I2S_WS 25        // Word Select (L/R Clock) за микрофона
+#define I2S_SD 33        // Serial Data от микрофона
+#define I2S_SCK 32       // Serial Clock за микрофона
+
+// Обект за комуникация с часовника (DAT, CLK, RST)
+ThreeWire myWire(27, 14, 26); 
+RtcDS1302<ThreeWire> Rtc(myWire);
+WebServer server(80);
+
+// Глобални променливи за настройки (променят се от уеб интерфейса)
+uint32_t sampleRate = 16000;  // Честота на дискретизация (качество)
+int threshold = 800;          // Праг, над който започва запис
+int hysteresis = 150;         // Толеранс, за да не спира при най-малкия спад
+uint32_t maxDuration = 60;    // Максимална дължина на един файл в секунди
+volatile bool isPaused = true; // Дали системата е в режим "Пауза"
+volatile bool formatRequest = false; // Флаг за форматиране на паметта
+bool wifiEnabled = true;      // Статус на WiFi модула
+
+// Функция за конфигуриране на аудио входа (I2S)
+void setupI2S(uint32_t rate) {
+  i2s_driver_uninstall(I2S_NUM_0); // Премахваме стария драйвер, ако сменяме Hz
+  i2s_config_t cfg = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX), // ESP32 е водещ, само приема
+    .sample_rate = rate,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,         // Ползваме само един микрофон
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .dma_buf_count = 8,                                  // Брой буфери за плавна работа
+    .dma_buf_len = 512,                                  // Размер на всеки буфер
+    .use_apll = false 
+  };
+  i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
+  i2s_pin_config_t pins = {.bck_io_num=I2S_SCK, .ws_io_num=I2S_WS, .data_out_num=-1, .data_in_num=I2S_SD};
+  i2s_set_pin(I2S_NUM_0, &pins);
+}
+
+// Функция за записване на WAV хедъра (прави файла разпознаваем за плейърите)
+void writeHeader(File f, uint32_t dSize, uint32_t rate) {
+  f.seek(0); // Връщаме се в началото на файла
+  uint32_t fSize = dSize + 36; uint32_t br = rate * 2;
+  byte h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+  memcpy(&h[4], &fSize, 4); memcpy(&h[24], &rate, 4); memcpy(&h[28], &br, 4); memcpy(&h[40], &dSize, 4);
+  f.write(h, 44);
+}
+
+// Генериране на главната страница на уеб сайта
+void handleRoot() {
+  String h = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><style>button{height:45px; margin:5px; padding:10px; border-radius:8px;} .file-box{background:#f0f0f0; padding:15px; border-bottom:2px solid #ccc; margin-bottom:10px; border-radius:10px;}</style></head><body>";
+  h += "<h1>🎙️ СИЙКА v8.64</h1>";
+  size_t total = SPIFFS.totalBytes(); size_t used = SPIFFS.usedBytes();
+  h += "Памет: <b>" + String((total - used)/1024) + " KB свободни</b><br>";
+  h += "СТАТУС: <b>" + String(isPaused ? "ГОТОВ" : "<span style='color:red'>ЗАПИСВА/СЛУША</span>") + "</b><hr>";
+  
+  // Бутони за управление
+  h += "<button onclick=\"location.href='/toggle'\">▶ ПУСНИ/СПРИ</button><button onclick=\"location.href='/'\">🔄 ОПРЕСНИ</button><hr>";
+  
+  // Форма за настройки
+  h += "<h3>⚙️ НАСТРОЙКИ:</h3><form action='/set'>";
+  h += "Hz: <input type='number' name='hz' value='"+String(sampleRate)+"' style='width:80px'> ";
+  h += "Th: <input type='number' name='th' value='"+String(threshold)+"' style='width:60px'><br>";
+  h += "Hys: <input type='number' name='hys' value='"+String(hysteresis)+"' style='width:60px'> ";
+  h += "Sec: <input type='number' name='sec' value='"+String(maxDuration)+"' style='width:60px'><br>";
+  h += "<input type='submit' value='ЗАПАЗИ НАСТРОЙКИТЕ'></form><hr><h3>📁 ЗАПИСИ:</h3>";
+  
+  // Списък с файлове в паметта
+  File root = SPIFFS.open("/"); File f = root.openNextFile();
+  while(f){
+    String n = f.name(); if(n.endsWith(".wav")){
+      String path = n.startsWith("/") ? n : "/" + n;
+      h += "<div class='file-box'><b>"+n+"</b> ("+String(f.size()/1024)+" KB)<br><audio controls style='width:100%; margin:10px 0;'><source src='/stream?f="+path+"' type='audio/wav'></audio><br>";
+      h += "<a href='/dl?f="+path+"'>📥 СВАЛИ</a> | <a href='/del?f="+path+"' style='color:red'>[ИЗТРИЙ]</a></div>";
+    } f = root.openNextFile();
+  }
+  h += "<hr><button style='background:#fee; color:red' onclick=\"if(confirm('ТРИЕШ ВСИЧКО?')) location.href='/format'\">⚠ ФОРМАТИРАЙ ПАМЕТТА</button></body></html>";
+  server.send(200, "text/html", h);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BTN_WIFI, INPUT_PULLUP);
+  pinMode(LED_WIFI, OUTPUT);
+  digitalWrite(LED_WIFI, HIGH); 
+  SPIFFS.begin(true); // true = форматирай автоматично, ако паметта е повредена
+  
+  // Инициализация и сверяване на часовника
+  Rtc.Begin();
+  Rtc.SetIsWriteProtected(false); // Отключваме за писане
+  Rtc.SetIsRunning(true);         // Стартираме броенето
+  
+  RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
+  RtcDateTime current = Rtc.GetDateTime();
+  
+  // Поправка на 2099 г.: ако чипът е извън реални граници, сверяваме с часа на компилация
+  if (current.Year() > 2090 || current.Year() < 2024) {
+    Rtc.SetDateTime(compiled); 
+  }
+
+  // WiFi Мениджър - ако няма мрежа, пуска собствено AP "Siyka_Turbo_AP"
+  WiFiManager wm;
+  wm.autoConnect("Siyka_Turbo_AP");
+  setupI2S(sampleRate);
+
+  // Дефиниране на уеб маршрутите
+  server.on("/", handleRoot);
+  server.on("/toggle", [](){ isPaused = !isPaused; server.sendHeader("Location", "/"); server.send(303); });
+  server.on("/set", [](){ 
+    sampleRate = server.arg("hz").toInt(); 
+    threshold = server.arg("th").toInt(); 
+    hysteresis = server.arg("hys").toInt();
+    maxDuration = server.arg("sec").toInt(); 
+    setupI2S(sampleRate);
+    server.sendHeader("Location", "/"); server.send(303); 
+  });
+  server.on("/del", [](){ String n = server.arg("f"); if(!n.startsWith("/")) n = "/" + n; SPIFFS.remove(n); server.sendHeader("Location", "/"); server.send(303); });
+  server.on("/format", [](){ formatRequest = true; server.send(200, "text/html", "Formatting..."); });
+  server.on("/stream", [](){ String n = server.arg("f"); if(!n.startsWith("/")) n = "/" + n; File f = SPIFFS.open(n, "r"); server.streamFile(f, "audio/wav"); f.close(); });
+  server.on("/dl", [](){ String n = server.arg("f"); if(!n.startsWith("/")) n = "/" + n; File f = SPIFFS.open(n, "r"); server.sendHeader("Content-Disposition", "attachment; filename=" + n.substring(1)); server.streamFile(f, "application/octet-stream"); f.close(); });
+
+  server.begin();
+
+  // Пускаме Уеб сървъра на Ядро 0 (второстепенно натоварване)
+  xTaskCreatePinnedToCore([](void*p){for(;;){server.handleClient();vTaskDelay(5);}}, "Web", 8192, NULL, 1, NULL, 0);
+  // Пускаме Аудио записа на Ядро 1 (приоритетно натоварване)
+  xTaskCreatePinnedToCore(AudioTask, "Audio", 8192, NULL, 4, NULL, 1);
+}
+
+// Главна функция за аудио обработка и запис
+void AudioTask(void * pvParameters) {
+  int16_t sBuf[512]; // Буфер за текущия звук
+  size_t r;
+  for(;;) {
+    // Проверка на физическия бутон за WiFi
+    if (digitalRead(BTN_WIFI) == LOW) {
+      vTaskDelay(50);
+      if (digitalRead(BTN_WIFI) == LOW) {
+        wifiEnabled = !wifiEnabled;
+        if (wifiEnabled) { WiFi.mode(WIFI_STA); WiFi.begin(); digitalWrite(LED_WIFI, HIGH); }
+        else { WiFi.mode(WIFI_OFF); digitalWrite(LED_WIFI, LOW); }
+        while(digitalRead(BTN_WIFI) == LOW) vTaskDelay(10);
+      }
+    }
+
+    // Рестартиране при заявка за формат
+    if (formatRequest) { SPIFFS.format(); ESP.restart(); }
+
+    if (!isPaused) {
+      // Постоянно четем от микрофона, за да хванем пик
+      i2s_read(I2S_NUM_0, &sBuf, sizeof(sBuf), &r, 10);
+      int peak = 0;
+      for (int i=0; i<r/2; i++) if(abs(sBuf[i]) > peak) peak = abs(sBuf[i]);
+
+      // Ако звукът надвиши прага (threshold), почваме нов файл
+      if (peak > threshold) {
+        RtcDateTime now = Rtc.GetDateTime();
+        char fn[64];
+        // Форматиране на името: Година-Месец-Ден_Час-Мин-Сек
+        sprintf(fn, "/%04d-%02d-%02d_%02d-%02d-%02d.wav", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second());
+        
+        File file = SPIFFS.open(fn, FILE_WRITE);
+        if(file) {
+          file.write(new byte[44], 44); // Резервираме място за WAV хедъра
+          uint32_t total = 0;
+          unsigned long startM = millis();
+          
+          // Цикъл на самия запис - продължава до maxDuration или до спиране на пауза
+          while(!isPaused && (millis() - startM < maxDuration * 1000) && total < 3000000) {
+            if (i2s_read(I2S_NUM_0, &sBuf, sizeof(sBuf), &r, 10) == ESP_OK && r > 0) {
+              file.write((const byte*)sBuf, r);
+              total += r;
+            }
+          }
+          // След като затворим, попълваме хедъра с реалния размер на данните
+          writeHeader(file, total, sampleRate);
+          file.close();
+        }
+      }
+    }
+    vTaskDelay(1); // Кратка пауза, за да не прегрява процесорът
+  }
+}
+
+// loop() остава празен, защото всичко работи в Tasks на двете ядра
+void loop() {}
