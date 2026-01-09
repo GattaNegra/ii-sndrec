@@ -35,6 +35,8 @@ uint32_t maxDuration = 60;
 volatile bool isPaused = true; 
 volatile bool formatRequest = false;
 bool wifiEnabled = true;
+int silLimit = 3; // Секунди тишина по подразбиране
+unsigned long lastSoundMillis;
 
 void setupI2S(uint32_t rate) {
   i2s_driver_uninstall(I2S_NUM_0);
@@ -74,6 +76,7 @@ void handleRoot() {
   h += "Th: <input type='number' name='th' value='"+String(threshold)+"' style='width:60px'><br>";
   h += "Hys: <input type='number' name='hys' value='"+String(hysteresis)+"' style='width:60px'> ";
   h += "Sec: <input type='number' name='sec' value='"+String(maxDuration)+"' style='width:60px'><br>";
+  h += "Sil: <input type='number' name='sil' value='"+String(silLimit)+"' style='width:50px'>";
   h += "<input type='submit' value='ЗАПАЗИ НАСТРОЙКИТЕ'></form><hr><h3>📁 ЗАПИСИ (SD):</h3>";
   
   File root = SD.open("/"); File f = root.openNextFile();
