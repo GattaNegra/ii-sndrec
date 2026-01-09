@@ -1,0 +1,202 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>         // Комуникация със SD картата (сериен протокол)
+#include <SD.h>          // Работа с файловата система на SD картата
+#include <driver/i2s.h>  // Драйвер за дигитален звук (микрофона)
+#include <Wire.h>        // I2C комуникация (за часовника)
+#include "RTClib.h"      // Библиотека за DS3231 часовник
+#include <WiFiManager.h> // Автоматично меню за свързване към WiFi
+
+// ДЕФИНИЦИИ НА ПИНОВЕ - Трябва да съвпадат с кабелите!
+#define SD_CS 5
+#define SD_MOSI 23
+#define SD_MISO 19
+#define SD_SCK 18
+#define I2S_WS 25
+#define I2S_SD 33
+#define I2S_SCK 32
+#define I2C_SDA 21
+#define I2C_SCL 22
+#define BTN_WIFI 4
+#define LED_WIFI 2
+
+RTC_DS3231 rtc;      // Обект за часовника (пази точно време)
+WebServer server(80); // Уеб сървър на порт 80
+
+// ГЛОБАЛНИ НАСТРОЙКИ (променят се от уеб интерфейса)
+uint32_t sampleRate = 16000;
+int threshold = 800;   // Ниво на шум за старт на запис
+int hysteresis = 150;  // Толеранс, за да не прекъсва записа при малки колебания
+uint32_t maxDuration = 60; // Макс. дължина на файл в секунди
+volatile bool isPaused = true; // Дали Сийка "слуша" в момента
+bool wifiEnabled = true;
+int silLimit = 3;      // Колко секунди тишина спират записа
+
+// Конфигуриране на I2S интерфейса за микрофона
+void setupI2S(uint32_t rate) {
+  i2s_driver_uninstall(I2S_NUM_0); // Маха стария драйвер преди превключване на Hz
+  i2s_config_t cfg = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX), // ESP32 е господар, микрофонът праща
+    .sample_rate = rate,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,         // Ползваме моно
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .dma_buf_count = 8,   // Брой буфери (кофички за данни)
+    .dma_buf_len = 512,   // Размер на всяка кофичка
+    .use_apll = false 
+  };
+  i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
+  i2s_pin_config_t pins = {.bck_io_num=I2S_SCK, .ws_io_num=I2S_WS, .data_out_num=-1, .data_in_num=I2S_SD};
+  i2s_set_pin(I2S_NUM_0, &pins);
+}
+
+// Генериране на WAV заглавие (44 байта), което казва на компютъра "Аз съм аудио файл"
+void writeHeader(File f, uint32_t dSize, uint32_t rate) {
+  f.seek(0); // Отива в самото начало на файла
+  uint32_t fSize = dSize + 36; 
+  uint32_t br = rate * 2; // Байт рейт (rate * 1 канал * 2 байта)
+  byte h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+  memcpy(&h[4], &fSize, 4);   // Размер на целия файл
+  memcpy(&h[24], &rate, 4);   // Честота (Hz)
+  memcpy(&h[28], &br, 4);     // Байтове в секунда
+  memcpy(&h[40], &dSize, 4);  // Размер само на аудио данните
+  f.write(h, 44);             // Записва заглавието върху празните байтове
+}
+
+// ГЛАВНАТА СТРАНИЦА (HTML)
+void handleRoot() {
+  String h = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  h += "<style>button{height:45px; margin:5px; padding:10px; border-radius:8px;} .file-box{background:#f0f0f0; padding:15px; border-bottom:2px solid #ccc; margin-bottom:10px; border-radius:10px;}</style></head><body>";
+  h += "<h1>🎙️ Turbo СИЙКА v8.65 (SD)</h1>";
+  
+  // Изчисляване на паметта на SD картата
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  uint64_t usedSize = SD.usedBytes() / (1024 * 1024);
+  h += "SD Карта: <b>" + String(usedSize) + " / " + String(cardSize) + " MB използвани</b><br>";
+  h += "СТАТУС: <b>" + String(isPaused ? "ГОТОВ" : "<span style='color:red'>ЗАПИСВА/СЛУША</span>") + "</b><hr>";
+  
+  h += "<button onclick=\"location.href='/toggle'\">▶ ПУСНИ/СПРИ</button><button onclick=\"location.href='/'\">🔄 ОПРЕСНИ</button><hr>";
+  
+  // Форма за настройки
+  h += "<h3>⚙️ НАСТРОЙКИ:</h3><form action='/set'>";
+  h += "Hz: <select name='hz'>";
+  uint32_t rates[] = {8000, 16000, 32000, 44100, 48000};
+  for(int i=0; i<5; i++) { h += "<option value='" + String(rates[i]) + "'" + (sampleRate == rates[i] ? " selected" : "") + ">" + String(rates[i]) + "</option>"; }
+  h += "</select> Th: <input type='number' name='th' value='"+String(threshold)+"' style='width:60px'><br>";
+  h += "Hys: <input type='number' name='hys' value='"+String(hysteresis)+"' style='width:60px'> Sec: <input type='number' name='sec' value='"+String(maxDuration)+"' style='width:60px'><br>";
+  h += "Sil: <input type='number' name='sil' value='"+String(silLimit)+"' style='width:50px'><br>";
+  h += "<input type='submit' value='ЗАПАЗИ'></form><hr><h3>📁 ЗАПИСИ (SD):</h3>";
+  
+  // Обхождане на файловете на SD картата
+  File root = SD.open("/"); File f = root.openNextFile();
+  while(f){
+    String n = f.name(); if(n.endsWith(".wav")){
+      if(n.startsWith("/")) n.remove(0,1);
+      h += "<div class='file-box'><b>"+n+"</b> ("+String(f.size()/1024)+" KB)<br>";
+      h += "<audio controls style='width:100%; margin:10px 0;'><source src='/stream?f="+n+"' type='audio/wav'></audio><br>";
+      h += "<a href='/dl?f="+n+"'>📥 СВАЛИ</a> | <a href='/del?f="+n+"' style='color:red'>[ИЗТРИЙ]</a></div>";
+    } f = root.openNextFile();
+  }
+  h += "<hr><button style='background:#fee; color:red; width:100%' onclick=\"if(confirm('ТРИЕШ ВСИЧКИ?')) location.href='/format'\">⚠ ИЗТРИЙ ВСИЧКО</button></body></html>";
+  server.send(200, "text/html", h);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BTN_WIFI, INPUT_PULLUP);
+  pinMode(LED_WIFI, OUTPUT);
+  digitalWrite(LED_WIFI, HIGH); 
+  
+  Wire.begin(I2C_SDA, I2C_SCL); // Пуска I2C за часовника
+  rtc.begin();                  // Стартира часовника
+  
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS); // Настройка на шината за SD
+  SD.begin(SD_CS);
+
+  WiFiManager wm;
+  wm.autoConnect("Siyka_Turbo_SD"); // Отваря точка за достъп при липса на WiFi
+  
+  setupI2S(sampleRate);
+  
+  // УЕБ МАРШРУТИ (Какво да прави сървъра при натискане на бутон)
+  server.on("/", handleRoot);
+  server.on("/toggle", [](){ isPaused = !isPaused; server.sendHeader("Location", "/"); server.send(303); });
+  server.on("/set", [](){ 
+    sampleRate = server.arg("hz").toInt(); threshold = server.arg("th").toInt(); 
+    hysteresis = server.arg("hys").toInt(); maxDuration = server.arg("sec").toInt(); 
+    silLimit = server.arg("sil").toInt(); setupI2S(sampleRate);
+    server.sendHeader("Location", "/"); server.send(303); 
+  });
+  server.on("/del", [](){ SD.remove("/"+server.arg("f")); server.sendHeader("Location", "/"); server.send(303); });
+  server.on("/stream", [](){ File f = SD.open("/" + server.arg("f"), "r"); server.streamFile(f, "audio/wav"); f.close(); });
+  server.on("/dl", [](){ String n = server.arg("f"); File f = SD.open("/" + n, "r"); server.sendHeader("Content-Disposition", "attachment; filename=" + n); server.streamFile(f, "application/octet-stream"); f.close(); });
+  
+  server.on("/format", [](){ 
+    File root = SD.open("/"); File f = root.openNextFile();
+    while(f){ String n = f.name(); f.close(); if(n.endsWith(".wav")) SD.remove("/"+n); f = root.openNextFile(); }
+    server.send(200, "text/html", "Изтрито! <meta http-equiv='refresh' content='2;url=/'>");
+  });
+
+  server.begin();
+  
+  // МУЛТИТАСКИНГ: Core 0 се грижи за сайта, Core 1 се грижи само за звука
+  xTaskCreatePinnedToCore([](void*p){for(;;){server.handleClient();vTaskDelay(5);}}, "Web", 8192, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(AudioTask, "Audio", 8192, NULL, 4, NULL, 1);
+}
+
+// ОСНОВНА ЗАДАЧА ЗА АУДИО (РАБОТИ НА CORE 1)
+void AudioTask(void * pvParameters) {
+  int16_t sBuf[512]; // Буфер за семпли (16-битови числа)
+  size_t r;          // Колко байта са прочетени реално
+  for(;;) {
+    // Проверка за физическия бутон за WiFi
+    if (digitalRead(BTN_WIFI) == LOW) {
+        vTaskDelay(50);
+        if (digitalRead(BTN_WIFI) == LOW) {
+            wifiEnabled = !wifiEnabled;
+            if (wifiEnabled) { WiFi.mode(WIFI_STA); WiFi.begin(); digitalWrite(LED_WIFI, HIGH); }
+            else { WiFi.mode(WIFI_OFF); digitalWrite(LED_WIFI, LOW); }
+            while(digitalRead(BTN_WIFI) == LOW) vTaskDelay(10);
+        }
+    }
+
+    if (!isPaused) {
+      i2s_read(I2S_NUM_0, &sBuf, sizeof(sBuf), &r, 10);
+      int peak = 0;
+      for (int i=0; i<r/2; i++) if(abs(sBuf[i]) > peak) peak = abs(sBuf[i]); // Търси най-силния сигнал
+
+      if (peak > threshold) { // ИМА ШУМ -> ПОЧВА ЗАПИС
+        DateTime now = rtc.now(); // Взима времето от часовника
+        char fn[64];
+        sprintf(fn, "/%04d-%02d-%02d_%02d-%02d-%02d.wav", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+        
+        File file = SD.open(fn, FILE_WRITE);
+        if(file) {
+          file.write(new byte[44], 44); // Резервира място за заглавието
+          uint32_t total = 0;
+          unsigned long startM = millis();
+          unsigned long lastSoundM = millis(); 
+          
+          // Цикъл на самия запис
+          while(!isPaused && (millis() - startM < (unsigned long)maxDuration * 1000)){
+            if (i2s_read(I2S_NUM_0, &sBuf, sizeof(sBuf), &r, 10) == ESP_OK && r > 0) {
+              file.write((const byte*)sBuf, r); // Пише аудиото на картата
+              total += r;
+
+              int curPeak = 0;
+              for (int i=0; i<r/2; i++) if(abs(sBuf[i]) > curPeak) curPeak = abs(sBuf[i]);
+
+              if (curPeak > (threshold - hysteresis)) lastSoundM = millis(); // Рестартира таймера за тишина
+              
+              if (millis() - lastSoundM > (unsigned long)silLimit * 1000) break; // Млъкнаха -> спираме
+            }
+          }
+          writeHeader(file, total, sampleRate); // Попълва заглавието накрая
+          file.close();
+        }
+      }
+    }
+    vTaskDelay(1); // Дава малко време на процесора да "диша"
+  }
+}
+void loop() {} // Празен, защото ползваме Task-ове на ядрата
