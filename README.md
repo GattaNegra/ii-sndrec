@@ -1,3 +1,7 @@
+// * Turbo СИЙКА v9 (2CSD)
+// * Copyright (C) 2026 GattaNegra gattanegrabg@gmail.com
+// * * This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License.
+
 Да я подкараме на ESP32
 1 Като качиш кода чрез Arduino IDE, потърси от телефона или лаптопа мрежа Siyka_Turbo_SD и се свържи с нея.
 2 Трябва автоматично да изскочи прозорец за настройки. Ако не изскочи, в браузъра отвори 192.168.4.1.
